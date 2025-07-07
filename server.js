@@ -1,117 +1,152 @@
 // server.js
 
-require('dotenv').config(); // Load variables from .env first
-const express = require('express');
-const { Pool } = require('pg'); // For PostgreSQL
-const cors = require('cors');
-const url = require('url'); // Add this line for URL parsing
+// ---------------------------
+// 1. Module Imports (นำเข้าโมดูลที่จำเป็น)
+// ---------------------------
+require('dotenv').config(); // โหลดตัวแปรสภาพแวดล้อมจากไฟล์ .env
+const express = require('express'); // Framework สำหรับสร้างเว็บแอปพลิเคชัน
+const { Pool } = require('pg'); // เชื่อมต่อกับ PostgreSQL Database
+const cors = require = require('cors'); // จัดการ Cross-Origin Resource Sharing (CORS) สำหรับการสื่อสารระหว่าง Frontend/Backend
 
-const app = express();
-const port = process.env.PORT || 3000; // Use port 3000 or from Environment Variable
+const app = express(); // สร้าง Instance ของ Express App
+const port = process.env.PORT || 3000; // กำหนด Port ให้ Server รัน (ใช้ Port จาก .env หรือ 3000 เป็นค่าเริ่มต้น)
 
-// Middleware
-app.use(express.json()); // For Parse JSON body
-app.use(cors()); // Allow your Frontend to call API
+// ---------------------------
+// 2. Middleware Setup (ตั้งค่า Middleware)
+// ---------------------------
+app.use(cors()); // เปิดใช้งาน CORS สำหรับทุก requests
+app.use(express.json()); // Middleware สำหรับ Parse JSON Body จาก requests (เช่น POST, PUT)
+app.use(express.static('public')); // กำหนดให้ Serve ไฟล์ Static จาก Folder 'public' (สำหรับ Frontend)
 
-// Database Connection (Updated to parse DATABASE_URL explicitly)
-// Parse the DATABASE_URL to get host, port, etc.
-const params = url.parse(process.env.DATABASE_URL);
-const auth = params.auth.split(':'); // Split user and password
-
+// ---------------------------
+// 3. Database Connection Pool (ตั้งค่าการเชื่อมต่อฐานข้อมูล)
+// ---------------------------
+// ใช้ DATABASE_URL จากตัวแปรสภาพแวดล้อมของ Render.com หรือ .env file
 const pool = new Pool({
-    user: auth[0],
-    password: auth[1],
-    host: params.hostname, // Extract hostname
-    port: params.port,     // Extract port
-    database: params.pathname.split('/')[1], // Extract database name
-    ssl: params.query.sslmode === 'require' ? { rejectUnauthorized: false } : false, // Adjust SSL based on sslmode=require
+    connectionString: process.env.DATABASE_URL, // ใช้ Connection String โดยตรง
+    ssl: {
+        rejectUnauthorized: false // จำเป็นสำหรับ Render.com เมื่อเชื่อมต่อผ่าน SSL
+    }
 });
 
-// Test database connection
-pool.connect()
-    .then(client => {
-        console.log('Connected to PostgreSQL database on Neon.tech');
-        client.release();
-    })
-    .catch(err => {
-        console.error('Error connecting to database', err.stack);
-    });
+// ตรวจสอบการเชื่อมต่อ Database
+pool.on('connect', () => {
+    console.log('Connected to the PostgreSQL database!');
+});
 
-// ----------------------------------------
-// API Endpoints for managing notes
-// ----------------------------------------
+pool.on('error', (err) => {
+    console.error('Error connecting to the database:', err);
+});
 
-// 1. API: Fetch all notes for the specified month/year
-// Example call: GET /api/notes?month=06&year=2025
+// ---------------------------
+// 4. API Endpoints (กำหนด Endpoint ของ API)
+// ---------------------------
+
+// 4.1. GET /api/notes: ดึงโน้ตทั้งหมด (หรือกรองตามวันที่/ผู้ใช้ในอนาคต)
 app.get('/api/notes', async (req, res) => {
-    const { year, month } = req.query; // Get year and month from query parameter
-    if (!year || !month) {
-        return res.status(400).json({ message: 'Missing year or month parameter' });
-    }
     try {
-        // Select notes for the desired month (adjust table structure and query as needed)
-        // Example: Fetch all notes within the specified year and month
-        const result = await pool.query(
-            `SELECT date_key, note_content FROM notes 
-             WHERE EXTRACT(YEAR FROM date_key::date) = $1 
-             AND EXTRACT(MONTH FROM date_key::date) = $2`,
-            [year, month]
-        );
-
-        // Convert array of objects to an object with date_key as key (like notes in Frontend)
-        const notesMap = result.rows.reduce((acc, row) => {
-            acc[row.date_key] = row.note_content;
-            return acc;
-        }, {});
-
-        res.status(200).json(notesMap);
-    } catch (error) {
-        console.error('Error fetching notes:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        const result = await pool.query('SELECT id, date_key AS date, note_content AS text, user_name FROM notes ORDER BY date_key, id');
+        res.json(result.rows); // ส่งข้อมูลโน้ตทั้งหมดกลับไปในรูปแบบ JSON
+    } catch (err) {
+        console.error('Error fetching notes:', err);
+        res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// 2. API: Save/Update a note
-// Example call: POST /api/notes
-// Body: { "date_key": "YYYY-MM-DD", "note_content": "Note text" }
+// 4.2. POST /api/notes: เพิ่มโน้ตใหม่
 app.post('/api/notes', async (req, res) => {
-    const { date_key, note_content } = req.body;
-    if (!date_key || note_content === undefined) { // note_content can be an empty string
-        return res.status(400).json({ message: 'Missing date_key or note_content' });
+    const { date, text, user_name } = req.body; // รับ date, text, user_name จาก Body ของ Request
+    // ตรวจสอบข้อมูลที่จำเป็น
+    if (!date || !text || !user_name) {
+        return res.status(400).json({ message: 'Date, text, and user_name are required.' });
     }
     try {
-        if (note_content.trim() === '') {
-            // If an empty note is sent, delete that note
-            await pool.query('DELETE FROM notes WHERE date_key = $1', [date_key]);
-            res.status(200).json({ message: 'Note deleted successfully' });
-        } else {
-            // If there is a note, INSERT or UPDATE
-            await pool.query(
-                'INSERT INTO notes (date_key, note_content) VALUES ($1, $2) ON CONFLICT (date_key) DO UPDATE SET note_content = $2',
-                [date_key, note_content]
-            );
-            res.status(200).json({ message: 'Note saved successfully' });
+        // ใช้ DEFAULT gen_random_uuid() สำหรับ id, ไม่ต้องใส่ใน INSERT
+        const result = await pool.query(
+            'INSERT INTO notes (date_key, note_content, user_name) VALUES ($1, $2, $3) RETURNING id, date_key AS date, note_content AS text, user_name',
+            [date, text, user_name] // ค่าที่ส่งไปใน Query
+        );
+        res.status(201).json(result.rows[0]); // ส่งโน้ตที่เพิ่มใหม่กลับไปพร้อม ID ที่ถูกสร้าง
+    } catch (err) {
+        console.error('Error adding note:', err);
+        res.status(500).json({ message: 'Internal Server Error' });
+    }
+});
+
+// 4.3. PUT /api/notes/:id: แก้ไขโน้ตที่มีอยู่ (ตรวจสอบสิทธิ์ผู้ใช้)
+app.put('/api/notes/:id', async (req, res) => {
+    const { id } = req.params; // รับ ID ของโน้ตจาก URL Parameter
+    const { text, user_name } = req.body; // รับ text ใหม่และ user_name จาก Body ของ Request
+    
+    // ตรวจสอบข้อมูลที่จำเป็น
+    if (!text || !user_name) {
+        return res.status(400).json({ message: 'Text and user_name are required for update.' });
+    }
+
+    try {
+        // ก่อนอัปเดต: ตรวจสอบว่าโน้ตนั้นเป็นของผู้ใช้คนนี้หรือไม่
+        const checkOwnership = await pool.query('SELECT user_name FROM notes WHERE id = $1', [id]);
+        if (checkOwnership.rows.length === 0) {
+            return res.status(404).json({ message: 'Note not found.' });
         }
-    } catch (error) {
-        console.error('Error saving note:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        if (checkOwnership.rows[0].user_name !== user_name) {
+            return res.status(403).json({ message: 'Forbidden: You do not own this note.' }); // ถ้าไม่ใช่เจ้าของ
+        }
+
+        // ถ้าเป็นเจ้าของ ให้อัปเดตได้
+        const result = await pool.query(
+            'UPDATE notes SET note_content = $1 WHERE id = $2 RETURNING id, date_key AS date, note_content AS text, user_name',
+            [text, id] // อัปเดตเฉพาะ note_content
+        );
+        
+        if (result.rows.length > 0) {
+            res.json(result.rows[0]); // ส่งโน้ตที่อัปเดตแล้วกลับไป
+        } else {
+            res.status(404).json({ message: 'Note not found.' });
+        }
+    } catch (err) {
+        console.error('Error updating note:', err);
+        res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// 3. API: Delete a note
-// Example call: DELETE /api/notes/YYYY-MM-DD
-app.delete('/api/notes/:date_key', async (req, res) => {
-    const { date_key } = req.params;
+// 4.4. DELETE /api/notes/:id: ลบโน้ต (ตรวจสอบสิทธิ์ผู้ใช้)
+app.delete('/api/notes/:id', async (req, res) => {
+    const { id } = req.params; // รับ ID ของโน้ตจาก URL Parameter
+    const { user_name } = req.body; // รับ user_name จาก Body ของ Request
+
+    if (!user_name) {
+        return res.status(400).json({ message: 'User name is required for deletion.' });
+    }
+
     try {
-        await pool.query('DELETE FROM notes WHERE date_key = $1', [date_key]);
-        res.status(200).json({ message: 'Note deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting note:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        // ก่อนลบ: ตรวจสอบว่าโน้ตนั้นเป็นของผู้ใช้คนนี้หรือไม่
+        const checkOwnership = await pool.query('SELECT user_name FROM notes WHERE id = $1', [id]);
+        if (checkOwnership.rows.length === 0) {
+            return res.status(404).json({ message: 'Note not found.' });
+        }
+        if (checkOwnership.rows[0].user_name !== user_name) {
+            return res.status(403).json({ message: 'Forbidden: You do not own this note.' }); // ถ้าไม่ใช่เจ้าของ
+        }
+
+        // ถ้าเป็นเจ้าของ ให้ลบได้
+        const result = await pool.query('DELETE FROM notes WHERE id = $1 RETURNING id', [id]);
+
+        if (result.rows.length > 0) {
+            res.status(200).json({ message: 'Note deleted successfully.' });
+        } else {
+            res.status(404).json({ message: 'Note not found.' });
+        }
+    } catch (err) {
+        console.error('Error deleting note:', err);
+        res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
-// Start Server
+// ---------------------------
+// 5. Start Server (เริ่มทำงาน Server)
+// ---------------------------
 app.listen(port, () => {
-    console.log(`Backend server running on http://localhost:${port}`);
+    console.log(`Server running on port ${port}`);
+    console.log(`Open your browser at http://localhost:${port}`);
 });
